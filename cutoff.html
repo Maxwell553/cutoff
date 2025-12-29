@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cutoff - Line Cutting Game</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.7.0/p5.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            background: #000;
+            font-family: Arial, sans-serif;
+        }
+        #canvas-container {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+        #startButton {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 100;
+            padding: 15px 30px;
+            font-size: 20px;
+            font-weight: bold;
+            color: #fff;
+            background: #00ff00;
+            border: 2px solid #00ff00;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.6);
+            transition: all 0.3s ease;
+        }
+        #startButton:hover {
+            background: #00cc00;
+            box-shadow: 0 0 30px rgba(0, 255, 0, 0.9);
+            transform: translate(-50%, -50%) scale(1.05);
+        }
+        #startButton.hidden {
+            display: none;
+        }
+        #restartButton {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 100;
+            padding: 10px 20px;
+            font-size: 16px;
+            font-weight: bold;
+            color: #fff;
+            background: rgba(255, 100, 100, 0.8);
+            border: 2px solid #ff6464;
+            border-radius: 8px;
+            cursor: pointer;
+            box-shadow: 0 0 15px rgba(255, 100, 100, 0.5);
+            transition: all 0.3s ease;
+        }
+        #restartButton:hover {
+            background: rgba(255, 100, 100, 1);
+            box-shadow: 0 0 25px rgba(255, 100, 100, 0.8);
+            transform: scale(1.05);
+        }
+        #restartButton.hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container">
+        <button id="startButton">Start</button>
+        <button id="restartButton" class="hidden">Restart</button>
+    </div>
+
+    <script>
+        // ============================================
+        // CUTOFF - LINE CUTTING GAME
+        // ============================================
+        // Simulation Parameters
+        const CANVAS_SIZE = 500;
+        const CIRCLE_RADIUS = 150;
+        const BALL_RADIUS = 8.25;
+        const INITIAL_LINES = 10; // Starting number of lines per ball
+        const BOUNCE_DAMPING = 0.95;
+        const GRAVITY = 0; // No gravity in this game
+        const BALL_SPEED_MIN = 80; // Increased initial speed
+        const BALL_SPEED_MAX = 120; // Increased initial speed
+        const SPEED_BOOST = 1.25; // Speed increase on bounce (25% faster - 50% of previous boost)
+        const MAX_ACCELERATIONS = 10; // Maximum number of speed boosts before capping
+        
+        // Ball colors (4 different colors)
+        const BALL_COLORS = [
+            [255, 100, 100], // Red
+            [100, 255, 100], // Green
+            [100, 100, 255], // Blue
+            [255, 255, 100]  // Yellow
+        ];
+        
+        // Global state
+        let balls = [];
+        let circleColorTimer = 0;
+        let lastFrameTime = 0;
+        let audioContext = null;
+        let gameStarted = false;
+        
+        // Initialize audio context (lazy initialization)
+        function initAudioContext() {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            return audioContext;
+        }
+        
+        // Play a marble striking glass sound
+        function playCollisionSound(pitch = 1.0, isBoundary = false) {
+            try {
+                const ctx = initAudioContext();
+                
+                // Ensure audio context is running
+                if (ctx.state === 'suspended') {
+                    ctx.resume().catch(e => console.log('Audio resume error:', e));
+                }
+                
+                // Only play if context is running
+                if (ctx.state !== 'running') {
+                    console.log('Audio context not running, state:', ctx.state);
+                    return;
+                }
+                
+                const oscillator = ctx.createOscillator();
+                const gainNode = ctx.createGain();
+                
+                // Connect oscillator to gain node to output
+                oscillator.connect(gainNode);
+                gainNode.connect(ctx.destination);
+                
+                // Set oscillator type for a more musical, glass-like sound
+                oscillator.type = 'sine';
+                
+                // Base frequency for boundary hits (consistent pitch)
+                // Higher frequency for ball-to-ball hits (varies by pitch parameter)
+                const baseFreq = isBoundary ? 400 : 500; // Boundary: 400Hz, Ball-to-ball: 500Hz base
+                oscillator.frequency.setValueAtTime(baseFreq * pitch, ctx.currentTime);
+                
+                // Create a quick attack and decay envelope for a "plink" sound
+                // Increased volume from 0.3 to 0.6 for better audibility
+                const now = ctx.currentTime;
+                gainNode.gain.setValueAtTime(0, now);
+                gainNode.gain.linearRampToValueAtTime(0.6, now + 0.01); // Quick attack (increased volume)
+                gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.2); // Slightly longer decay
+                
+                // Start and stop the oscillator
+                oscillator.start(now);
+                oscillator.stop(now + 0.2);
+            } catch (e) {
+                // Silently fail if audio context can't be created (e.g., user interaction required)
+                console.log('Audio not available:', e);
+            }
+        }
+        
+        // Line class - represents a line from circle edge to ball
+        class Line {
+            constructor(startX, startY, endX, endY, ballId) {
+                this.startX = startX;
+                this.startY = startY;
+                this.endX = endX;
+                this.endY = endY;
+                this.ballId = ballId; // Which ball owns this line
+            }
+            
+            // Check if ball edge touches this line (INSTANT - checks distance from ball edge to line)
+            checkCrossing(prevX, prevY, currX, currY) {
+                // Sample multiple points along ball's path to catch fast movement
+                const dx = currX - prevX;
+                const dy = currY - prevY;
+                const pathLength = Math.sqrt(dx * dx + dy * dy);
+                const samples = Math.max(5, Math.floor(pathLength / 3)); // Sample every 3 pixels
+                
+                for (let i = 0; i <= samples; i++) {
+                    const t = i / samples;
+                    const ballX = prevX + dx * t;
+                    const ballY = prevY + dy * t;
+                    
+                    // Calculate distance from ball center to line segment
+                    const dist = this.pointToLineDistance(ballX, ballY);
+                    
+                    // Check if ball edge (radius) touches the line
+                    if (dist <= BALL_RADIUS) {
+                        // Also check if the closest point on line is within the line segment
+                        const closestPoint = this.closestPointOnLine(ballX, ballY);
+                        if (this.isPointOnLineSegment(closestPoint.x, closestPoint.y)) {
+                            return true;
+                        }
+                    }
+                }
+                
+                return false;
+            }
+            
+            // Calculate distance from point to line segment
+            pointToLineDistance(px, py) {
+                const A = px - this.startX;
+                const B = py - this.startY;
+                const C = this.endX - this.startX;
+                const D = this.endY - this.startY;
+                
+                const dot = A * C + B * D;
+                const lenSq = C * C + D * D;
+                let param = -1;
+                
+                if (lenSq !== 0) {
+                    param = dot / lenSq;
+                }
+                
+                let xx, yy;
+                if (param < 0) {
+                    xx = this.startX;
+                    yy = this.startY;
+                } else if (param > 1) {
+                    xx = this.endX;
+                    yy = this.endY;
+                } else {
+                    xx = this.startX + param * C;
+                    yy = this.startY + param * D;
+                }
+                
+                const dx = px - xx;
+                const dy = py - yy;
+                return Math.sqrt(dx * dx + dy * dy);
+            }
+            
+            // Get closest point on line to given point
+            closestPointOnLine(px, py) {
+                const A = px - this.startX;
+                const B = py - this.startY;
+                const C = this.endX - this.startX;
+                const D = this.endY - this.startY;
+                
+                const dot = A * C + B * D;
+                const lenSq = C * C + D * D;
+                let param = -1;
+                
+                if (lenSq !== 0) {
+                    param = dot / lenSq;
+                }
+                
+                if (param < 0) {
+                    return { x: this.startX, y: this.startY };
+                } else if (param > 1) {
+                    return { x: this.endX, y: this.endY };
+                } else {
+                    return {
+                        x: this.startX + param * C,
+                        y: this.startY + param * D
+                    };
+                }
+            }
+            
+            // Check if point is on the line segment
+            isPointOnLineSegment(px, py) {
+                const dx = this.endX - this.startX;
+                const dy = this.endY - this.startY;
+                const d1 = Math.sqrt((px - this.startX) ** 2 + (py - this.startY) ** 2);
+                const d2 = Math.sqrt((px - this.endX) ** 2 + (py - this.endY) ** 2);
+                const lineLength = Math.sqrt(dx * dx + dy * dy);
+                
+                // Allow small tolerance for floating point errors
+                return Math.abs(d1 + d2 - lineLength) < 0.1;
+            }
+            
+            // Line-line intersection test
+            lineIntersection(x1, y1, x2, y2, x3, y3, x4, y4) {
+                const denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4);
+                if (Math.abs(denom) < 0.001) return false; // Lines are parallel
+                
+                const t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom;
+                const u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom;
+                
+                // Check if intersection is within both line segments
+                return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+            }
+            
+            // Update line end point (when ball moves)
+            updateEnd(x, y) {
+                this.endX = x;
+                this.endY = y;
+            }
+            
+            draw(color) {
+                stroke(color[0], color[1], color[2]);
+                strokeWeight(2);
+                line(this.startX, this.startY, this.endX, this.endY);
+            }
+        }
+        
+        // Ball class
+        class Ball {
+            constructor(x, y, color, id) {
+                this.x = x;
+                this.y = y;
+                this.prevX = x;
+                this.prevY = y;
+                
+                // Initial velocity towards center
+                const centerX = CANVAS_SIZE / 2;
+                const centerY = CANVAS_SIZE / 2;
+                const dx = centerX - x;
+                const dy = centerY - y;
+                const angle = Math.atan2(dy, dx);
+                const speed = BALL_SPEED_MIN + Math.random() * (BALL_SPEED_MAX - BALL_SPEED_MIN);
+                this.vx = Math.cos(angle) * speed;
+                this.vy = Math.sin(angle) * speed;
+                
+                this.color = color;
+                this.id = id;
+                this.lines = []; // Array of Line objects
+                this.lastEdgeContactTime = 0; // Prevent rapid line creation
+                this.accelerations = 0; // Track number of speed boosts
+            }
+            
+            // Create initial lines from starting position
+            // Lines attach to circle edge points closest to the ball, in a localized area
+            createInitialLines() {
+                const centerX = CANVAS_SIZE / 2;
+                const centerY = CANVAS_SIZE / 2;
+                
+                // Calculate angle from center to ball
+                const dx = this.x - centerX;
+                const dy = this.y - centerY;
+                const ballAngle = Math.atan2(dy, dx);
+                
+                // Create lines attached to points on circle edge closest to ball
+                // Spread them in a small arc around the ball's position (60 degree arc)
+                const arcSpread = Math.PI / 3; // 60 degrees total spread
+                const startAngle = ballAngle - arcSpread / 2;
+                
+                for (let i = 0; i < INITIAL_LINES; i++) {
+                    // Distribute lines evenly within the arc
+                    const angle = startAngle + (arcSpread * i) / (INITIAL_LINES - 1);
+                    const edgeX = centerX + Math.cos(angle) * CIRCLE_RADIUS;
+                    const edgeY = centerY + Math.sin(angle) * CIRCLE_RADIUS;
+                    
+                    this.lines.push(new Line(edgeX, edgeY, this.x, this.y, this.id));
+                }
+            }
+            
+            update(deltaTime, allLines, allBalls) {
+                // Store previous position for line crossing detection
+                this.prevX = this.x;
+                this.prevY = this.y;
+                
+                // Update position
+                this.x += this.vx * deltaTime;
+                this.y += this.vy * deltaTime;
+                
+                // Check collision with other balls first
+                let collided = false;
+                for (let otherBall of allBalls) {
+                    if (otherBall.id === this.id) continue; // Skip self
+                    
+                    const dx = otherBall.x - this.x;
+                    const dy = otherBall.y - this.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance < BALL_RADIUS * 2 && distance > 0) {
+                        collided = true;
+                        // Ball-to-ball collision - elastic bounce
+                        const angle = Math.atan2(dy, dx);
+                        const normalX = Math.cos(angle);
+                        const normalY = Math.sin(angle);
+                        
+                        // Relative velocity
+                        const relativeVelX = otherBall.vx - this.vx;
+                        const relativeVelY = otherBall.vy - this.vy;
+                        const dot = relativeVelX * normalX + relativeVelY * normalY;
+                        
+                        // Only resolve if balls are moving towards each other
+                        if (dot > 0) {
+                            const impulse = 1.0; // Increased impulse for better separation
+                            this.vx += impulse * dot * normalX * BOUNCE_DAMPING;
+                            this.vy += impulse * dot * normalY * BOUNCE_DAMPING;
+                            otherBall.vx -= impulse * dot * normalX * BOUNCE_DAMPING;
+                            otherBall.vy -= impulse * dot * normalY * BOUNCE_DAMPING;
+                            
+                            // Speed boost on bounce (only if under max accelerations)
+                            if (this.accelerations < MAX_ACCELERATIONS) {
+                                this.vx *= SPEED_BOOST;
+                                this.vy *= SPEED_BOOST;
+                                this.accelerations++;
+                            }
+                            if (otherBall.accelerations < MAX_ACCELERATIONS) {
+                                otherBall.vx *= SPEED_BOOST;
+                                otherBall.vy *= SPEED_BOOST;
+                                otherBall.accelerations++;
+                            }
+                            
+                            // Separate balls more aggressively to prevent overlap
+                            const overlap = BALL_RADIUS * 2 - distance;
+                            const separation = overlap * 0.6; // More separation
+                            this.x -= normalX * separation;
+                            this.y -= normalY * separation;
+                            otherBall.x += normalX * separation;
+                            otherBall.y += normalY * separation;
+                            
+                            // Play collision sound with varying pitch
+                            playCollisionSound(0.85 + Math.random() * 0.3, false);
+                        }
+                    }
+                }
+                
+                // Check collision with circle boundary
+                const centerX = CANVAS_SIZE / 2;
+                const centerY = CANVAS_SIZE / 2;
+                const dx = this.x - centerX;
+                const dy = this.y - centerY;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const effectiveRadius = CIRCLE_RADIUS - BALL_RADIUS;
+                
+                if (distance > effectiveRadius) {
+                    // Bounce off boundary
+                    const angle = Math.atan2(dy, dx);
+                    const normalX = Math.cos(angle);
+                    const normalY = Math.sin(angle);
+                    
+                    const dot = this.vx * normalX + this.vy * normalY;
+                    this.vx = (this.vx - 2 * dot * normalX) * BOUNCE_DAMPING;
+                    this.vy = (this.vy - 2 * dot * normalY) * BOUNCE_DAMPING;
+                    
+                    // Speed boost on wall bounce (only if under max accelerations)
+                    if (this.accelerations < MAX_ACCELERATIONS) {
+                        this.vx *= SPEED_BOOST;
+                        this.vy *= SPEED_BOOST;
+                        this.accelerations++;
+                    }
+                    
+                    // Play collision sound with consistent pitch for boundary hits
+                    playCollisionSound(1.0, true);
+                    
+                    // Push ball back inside
+                    this.x = centerX + normalX * effectiveRadius;
+                    this.y = centerY + normalY * effectiveRadius;
+                    
+                    // Create new line when touching edge (with cooldown)
+                    const currentTime = millis();
+                    if (currentTime - this.lastEdgeContactTime > 100) { // 100ms cooldown
+                        const edgeX = centerX + normalX * CIRCLE_RADIUS;
+                        const edgeY = centerY + normalY * CIRCLE_RADIUS;
+                        this.lines.push(new Line(edgeX, edgeY, this.x, this.y, this.id));
+                        this.lastEdgeContactTime = currentTime;
+                    }
+                }
+                
+                // Update all line end points to current ball position
+                this.lines.forEach(line => {
+                    line.updateEnd(this.x, this.y);
+                });
+                
+                // Check if this ball crosses any other ball's lines (INSTANT - no delay)
+                // But skip if ball is colliding with another ball (to prevent instant death)
+                if (!collided) {
+                    for (let otherBallId in allLines) {
+                        if (otherBallId == this.id) continue; // Skip own lines
+                        
+                        // Check if we're too close to the ball that owns these lines
+                        const ownerBall = allBalls.find(b => b.id == otherBallId);
+                        if (ownerBall) {
+                            const dx = ownerBall.x - this.x;
+                            const dy = ownerBall.y - this.y;
+                            const distToOwner = Math.sqrt(dx * dx + dy * dy);
+                            // Skip line cutting if too close to owner ball (collision zone)
+                            if (distToOwner < BALL_RADIUS * 3) continue;
+                        }
+                        
+                        const otherLines = allLines[otherBallId];
+                        for (let i = otherLines.length - 1; i >= 0; i--) {
+                            const line = otherLines[i];
+                            // Instant line cutting - check every frame with no delay
+                            if (line.checkCrossing(this.prevX, this.prevY, this.x, this.y)) {
+                                // Cut the line instantly!
+                                otherLines.splice(i, 1);
+                                playCollisionSound(0.9 + Math.random() * 0.2, false); // Varying pitch
+                            }
+                        }
+                    }
+                }
+            }
+            
+            draw() {
+                // Draw lines first (behind ball)
+                this.lines.forEach(line => {
+                    line.draw(this.color);
+                });
+                
+                // Draw ball
+                fill(this.color[0], this.color[1], this.color[2]);
+                noStroke();
+                ellipse(this.x, this.y, BALL_RADIUS * 2, BALL_RADIUS * 2);
+            }
+            
+            isAlive() {
+                return this.lines.length > 0;
+            }
+        }
+        
+        // Setup function
+        function setup() {
+            createCanvas(CANVAS_SIZE, CANVAS_SIZE);
+            background(0);
+            lastFrameTime = millis();
+            
+            // Initialize audio on first user interaction
+            document.addEventListener('click', () => {
+                initAudioContext();
+            }, { once: true });
+            
+            // Create 4 balls at cardinal directions
+            const centerX = CANVAS_SIZE / 2;
+            const centerY = CANVAS_SIZE / 2;
+            
+            const positions = [
+                { x: centerX, y: centerY - CIRCLE_RADIUS * 0.7, color: BALL_COLORS[0] }, // North - Red
+                { x: centerX, y: centerY + CIRCLE_RADIUS * 0.7, color: BALL_COLORS[1] }, // South - Green
+                { x: centerX + CIRCLE_RADIUS * 0.7, y: centerY, color: BALL_COLORS[2] }, // East - Blue
+                { x: centerX - CIRCLE_RADIUS * 0.7, y: centerY, color: BALL_COLORS[3] }  // West - Yellow
+            ];
+            
+            positions.forEach((pos, index) => {
+                const ball = new Ball(pos.x, pos.y, pos.color, index);
+                ball.createInitialLines();
+                balls.push(ball);
+            });
+            
+            // Setup start button
+            const startButton = document.getElementById('startButton');
+            const restartButton = document.getElementById('restartButton');
+            
+            if (startButton) {
+                startButton.addEventListener('click', async () => {
+                    startButton.classList.add('hidden');
+                    if (restartButton) restartButton.classList.remove('hidden');
+                    // Initialize audio context on user interaction (required by browsers)
+                    const ctx = initAudioContext();
+                    // Resume audio context if suspended
+                    if (ctx.state === 'suspended') {
+                        await ctx.resume();
+                    }
+                    // Test sound to verify audio is working - play a louder, longer sound
+                    setTimeout(() => {
+                        try {
+                            const osc = ctx.createOscillator();
+                            const gain = ctx.createGain();
+                            osc.connect(gain);
+                            gain.connect(ctx.destination);
+                            osc.type = 'sine';
+                            osc.frequency.setValueAtTime(600, ctx.currentTime);
+                            const now = ctx.currentTime;
+                            gain.gain.setValueAtTime(0, now);
+                            gain.gain.linearRampToValueAtTime(0.8, now + 0.05);
+                            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+                            osc.start(now);
+                            osc.stop(now + 0.3);
+                            console.log('Test sound played, audio context state:', ctx.state);
+                        } catch (e) {
+                            console.log('Test sound error:', e);
+                        }
+                    }, 100);
+                    gameStarted = true;
+                });
+            }
+            
+            // Setup restart button
+            if (restartButton) {
+                restartButton.addEventListener('click', () => {
+                    resetGame();
+                });
+            }
+        }
+        
+        // Reset game to initial state
+        function resetGame() {
+            // Clear all balls
+            balls = [];
+            
+            // Reset game state
+            gameStarted = false;
+            circleColorTimer = 0;
+            lastFrameTime = millis();
+            
+            // Recreate 4 balls at cardinal directions
+            const centerX = CANVAS_SIZE / 2;
+            const centerY = CANVAS_SIZE / 2;
+            
+            const positions = [
+                { x: centerX, y: centerY - CIRCLE_RADIUS * 0.7, color: BALL_COLORS[0] }, // North - Red
+                { x: centerX, y: centerY + CIRCLE_RADIUS * 0.7, color: BALL_COLORS[1] }, // South - Green
+                { x: centerX + CIRCLE_RADIUS * 0.7, y: centerY, color: BALL_COLORS[2] }, // East - Blue
+                { x: centerX - CIRCLE_RADIUS * 0.7, y: centerY, color: BALL_COLORS[3] }  // West - Yellow
+            ];
+            
+            positions.forEach((pos, index) => {
+                const ball = new Ball(pos.x, pos.y, pos.color, index);
+                ball.createInitialLines();
+                balls.push(ball);
+            });
+            
+            // Show start button, hide restart button
+            const startButton = document.getElementById('startButton');
+            const restartButton = document.getElementById('restartButton');
+            if (startButton) startButton.classList.remove('hidden');
+            if (restartButton) restartButton.classList.add('hidden');
+        }
+        
+        // Draw function
+        function draw() {
+            const currentTime = millis();
+            const deltaTime = (currentTime - lastFrameTime) / 1000.0;
+            lastFrameTime = currentTime;
+            
+            // Update circle color timer
+            circleColorTimer = (circleColorTimer + deltaTime) % 5.0;
+            
+            // Clear canvas
+            background(0);
+            
+            // Draw circle boundary
+            drawCircle();
+            
+            if (!gameStarted) {
+                // Show static preview - draw all balls with their lines
+                balls.forEach(ball => {
+                    ball.draw();
+                });
+                return;
+            }
+            
+            // Collect all lines for crossing detection
+            const allLines = {};
+            balls.forEach(ball => {
+                allLines[ball.id] = ball.lines;
+            });
+            
+            // Update and draw balls
+            for (let i = balls.length - 1; i >= 0; i--) {
+                const ball = balls[i];
+                ball.update(deltaTime, allLines, balls); // Pass all balls for collision detection
+                
+                // Remove ball if it has no lines left
+                if (!ball.isAlive()) {
+                    balls.splice(i, 1);
+                    playCollisionSound(0.7, false); // Lower pitch for elimination
+                } else {
+                    ball.draw();
+                }
+            }
+            
+        }
+        
+        // Draw circle boundary
+        function drawCircle() {
+            const centerX = CANVAS_SIZE / 2;
+            const centerY = CANVAS_SIZE / 2;
+            
+            stroke(255, 255, 255); // White
+            strokeWeight(5);
+            noFill();
+            ellipse(centerX, centerY, CIRCLE_RADIUS * 2, CIRCLE_RADIUS * 2);
+        }
+    </script>
+</body>
+</html>
+
